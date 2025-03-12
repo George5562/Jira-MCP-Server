@@ -4,3 +4,6 @@ build/
 .env*
 claude_README.md
 run-with-env.sh
+run-inspector-with-env.sh
+run-server.sh
+test-tools.js
