@@ -80,6 +80,7 @@ interface JiraIssueType {
 const JIRA_HOST = process.env.JIRA_HOST;
 const JIRA_EMAIL = process.env.JIRA_EMAIL;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
+const JIRA_API_VERSION = process.env.JIRA_API_VERSION || "3";
 
 if (!JIRA_HOST || !JIRA_EMAIL || !JIRA_API_TOKEN) {
   throw new Error(
@@ -465,7 +466,7 @@ class JiraServer {
       host: JIRA_HOST as string,
       username: JIRA_EMAIL as string,
       password: JIRA_API_TOKEN as string,
-      apiVersion: "3",
+      apiVersion: JIRA_API_VERSION as string,
       strictSSL: true,
     });
 
