@@ -33,25 +33,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import JiraClient from "jira-client";
 
-/**
- * Default project configuration from README.md
- */
-const DEFAULT_PROJECT = {
-  KEY: "CPG",
-  ID: "10000",
-  NAME: "Website MVP",
-  TYPE: "software",
-  ENTITY_ID: "e01e939e-8442-4967-835d-362886c653e3",
-};
 
-/**
- * Default project manager configuration from README.md
- */
-const DEFAULT_MANAGER = {
-  EMAIL: "ghsstephens@gmail.com",
-  ACCOUNT_ID: "712020:dc572395-3fef-4ee3-a31c-2e1b288c72d6",
-  NAME: "George",
-};
 
 interface JiraField {
   id: string;
@@ -81,6 +63,14 @@ const JIRA_HOST = process.env.JIRA_HOST;
 const JIRA_EMAIL = process.env.JIRA_EMAIL;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
 const JIRA_API_VERSION = process.env.JIRA_API_VERSION || "3";
+const JIRA_CUSTOM_FIELDS = process.env.JIRA_CUSTOM_FIELDS?.split(",") || [                "summary",
+  "description",
+  "status",
+  "priority",
+  "assignee",
+  "issuetype",
+  "parent",
+  "subtasks"]
 
 if (!JIRA_HOST || !JIRA_EMAIL || !JIRA_API_TOKEN) {
   throw new Error(
@@ -114,6 +104,7 @@ interface CreateIssueArgs {
   components?: string[];
   priority?: string;
   parent?: string;
+  [key: string]: any;
 }
 
 interface GetIssuesArgs {
@@ -128,6 +119,7 @@ interface UpdateIssueArgs {
   assignee?: string;
   status?: string;
   priority?: string;
+  [key: string]: any;
 }
 
 interface CreateIssueLinkArgs {
@@ -654,6 +646,18 @@ class JiraServer {
             };
           }
 
+          case "list_fields": {
+            const response = await this.jira.listFields();
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(response, null, 2),
+                },
+              ],
+            };
+          }
+
           case "list_issue_types": {
             const response = await this.jira.listIssueTypes();
             return {
@@ -697,14 +701,7 @@ class JiraServer {
             const response = await this.jira.searchJira(jql, {
               maxResults: 100,
               fields: [
-                "summary",
-                "description",
-                "status",
-                "priority",
-                "assignee",
-                "issuetype",
-                "parent",
-                "subtasks",
+                ...JIRA_CUSTOM_FIELDS
               ],
             });
 
@@ -732,15 +729,36 @@ class JiraServer {
             const unknownArgs = request.params.arguments as unknown;
             this.validateUpdateIssueArgs(unknownArgs);
             const args = unknownArgs as UpdateIssueArgs;
-
             const updateFields: any = {};
 
-            if (args.summary) {
-              updateFields.summary = args.summary;
-            }
-            if (args.description) {
-              updateFields.description = convertToADF(args.description);
-            }
+            // Process all fields from args dynamically
+            Object.entries(args).forEach(([key, value]) => {
+              // Skip undefined, null values and the issueKey (used for identifying the issue)
+              if (value === undefined || value === null || key === 'issueKey') {
+                return;
+              }
+
+              // Special handling for specific fields
+              if (key === 'description') {
+                // Handle description field format based on API version
+                if (JIRA_API_VERSION === "2") {
+                  updateFields[key] = value;
+                } else {
+                  updateFields[key] = convertToADF(value);
+                }
+              } else if (key === 'assignee') {
+                // Assignee will be handled separately due to user lookup requirement
+              } else if (key === 'status') {
+                // Status will be handled separately via transitions
+              } else if (key === 'priority') {
+                updateFields[key] = { name: value };
+              } else {
+                // Default handling for all other fields
+                updateFields[key] = value;
+              }
+            });
+
+            // Handle assignee with user lookup if specified
             if (args.assignee) {
               const users = await this.jira.searchUsers({
                 query: args.assignee,
@@ -751,6 +769,8 @@ class JiraServer {
                 updateFields.assignee = { accountId: users[0].accountId };
               }
             }
+
+            // Handle status transitions if specified
             if (args.status) {
               const transitions = await this.jira.listTransitions(
                 args.issueKey
@@ -763,9 +783,6 @@ class JiraServer {
                   transition: { id: transition.id },
                 });
               }
-            }
-            if (args.priority) {
-              updateFields.priority = { name: args.priority };
             }
 
             if (Object.keys(updateFields).length > 0) {
@@ -860,23 +877,93 @@ class JiraServer {
             this.validateCreateIssueArgs(unknownArgs);
             const args = unknownArgs as CreateIssueArgs;
 
-            const projectKey = args.projectKey || DEFAULT_PROJECT.KEY;
-            const assignee = args.assignee || DEFAULT_MANAGER.EMAIL;
+            const projectKey = args.projectKey;
+            const assignee = args.assignee;
+            const description = args.description;
+
+            if(!projectKey) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: "Missing required projectKey parameter"
+                  }
+                ],
+                isError: true
+              };
+            }
+
+            if(!description) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: "Missing required description parameter"
+                  }
+                ],
+                isError: true
+              };
+            }
+
+            // First resolve the assignee account ID if it's an email
+            let assigneeAccount = null;
+            if (assignee && assignee.includes('@')) {
+              const users = await this.jira.searchUsers({
+                query: assignee,
+                includeActive: true,
+                maxResults: 1,
+              });
+              if (users && users.length > 0) {
+                assigneeAccount = users[0];
+              }
+            }
+
+            const descriptionConverted = convertToADF(description)
+
+            // Handle description field format based on API version
+            let descriptionField;
+            if (JIRA_API_VERSION === "2") {
+              // For API v2, use plain text description
+              descriptionField = description;
+            } else {
+              // For API v3, use ADF format
+              descriptionField = descriptionConverted;
+            }
+
+            // Build the fields object dynamically
+            const fields: Record<string, any> = {
+              project: { key: projectKey },
+              issuetype: { name: args.issueType },
+            };
+
+            // Process all fields from args that are included in JIRA_CUSTOM_FIELDS
+            Object.entries(args).forEach(([key, value]) => {
+              // Skip undefined or null values and fields handled specially
+              if (value === undefined || value === null || key === 'projectKey' || key === 'issueType') {
+                return;
+              }
+
+              // Special handling for specific fields
+              if (key === 'description') {
+                fields[key] = descriptionField;
+              } else if (key === 'assignee' && assigneeAccount) {
+                fields[key] = assigneeAccount;
+              } else if (key === 'issuetype') {
+                fields.issuetype = { name: value };
+              } else if (key === 'components' && Array.isArray(value)) {
+                fields[key] = value.map((name) => ({ name }));
+              } else if (key === 'priority' && typeof value === 'string') {
+                fields[key] = { name: value };
+              } else if (key === 'parent' && typeof value === 'string') {
+                fields[key] = { key: value };
+              } else {
+                // Default handling for all other fields
+                fields[key] = value;
+              }
+            });
 
             const response = await this.jira.addNewIssue({
-              fields: {
-                project: { key: projectKey },
-                summary: args.summary,
-                issuetype: { name: args.issueType },
-                description: args.description
-                  ? convertToADF(args.description)
-                  : undefined,
-                assignee: { accountId: assignee },
-                labels: args.labels,
-                components: args.components?.map((name) => ({ name })),
-                priority: args.priority ? { name: args.priority } : undefined,
-                parent: args.parent ? { key: args.parent } : undefined,
-              },
+              fields,
             });
 
             return {
