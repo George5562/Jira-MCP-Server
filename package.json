@@ -18,7 +18,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "0.6.0",
-    "jira-client": "^8.2.2"
+    "dotenv": "^16.4.7",
+    "jira-client": "^8.2.2",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.1"
   },
   "devDependencies": {
     "@types/jira-client": "^7.1.9",
