@@ -32,6 +32,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import JiraClient from "jira-client";
+import "dotenv/config";
 
 /**
  * Default project configuration from README.md
@@ -121,11 +122,19 @@ interface CreateIssueArgs {
   components?: string[];
   priority?: string;
   parent?: string;
+  customFields?: Record<string, any>;
+  useRawDescription?: boolean;
 }
 
 interface GetIssuesArgs {
   projectKey: string;
   jql?: string;
+}
+
+interface GetIssueCreateMetaArgs {
+  projectKey: string;
+  issueType: string;
+  expand?: string;
 }
 
 interface UpdateIssueArgs {
@@ -135,6 +144,9 @@ interface UpdateIssueArgs {
   assignee?: string;
   status?: string;
   priority?: string;
+  customFields?: Record<string, any>;
+  useRawDescription?: boolean;
+  labels?: string[];
 }
 
 interface CreateIssueLinkArgs {
@@ -166,46 +178,12 @@ interface IssueType {
 }
 
 /**
- * Converts plain text to Atlassian Document Format (ADF)
- * Used for formatting issue descriptions in Jira's rich text format
- * @param text - Plain text to convert to ADF
- * @returns ADF document object with the text content
+ * Represents a custom field value option
  */
-function convertToADF(text: string) {
-  const lines = text.split("\n");
-  const content: any[] = [];
-  let currentList: any = null;
-  let currentListType: "bullet" | "ordered" | null = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const nextLine = lines[i + 1] || "";
-
-    // Skip empty lines between paragraphs
-    if (line.trim() === "") {
-      currentList = null;
-      currentListType = null;
-      continue;
-    }
-
-    // Handle bullet points
-    if (line.trim().startsWith("- ")) {
-      const listItem = line.trim().substring(2);
-      if (currentListType !== "bullet") {
-        currentList = {
-          type: "bulletList",
-          content: [],
-        };
-        content.push(currentList);
-        currentListType = "bullet";
-      }
-      currentList.content.push({
-        type: "listItem",
-        content: [
-          {
-            type: "paragraph",
-            content: [
-              {
+interface CustomFieldOption {
+  id: string;
+  value: string;
+}
 
 /**
  * Parse user mentions in free text and convert to Jira Cloud ADF mention nodes.
@@ -289,6 +267,49 @@ async function replaceMentionsWithADF(text: string, jira: JiraClient) {
   };
 }
 
+
+
+/**
+ * Converts plain text to Atlassian Document Format (ADF)
+ * Used for formatting issue descriptions in Jira's rich text format
+ * @param text - Plain text to convert to ADF
+ * @returns ADF document object with the text content
+ */
+function convertToADF(text: string) {
+  const lines = text.split("\n");
+  const content: any[] = [];
+  let currentList: any = null;
+  let currentListType: "bullet" | "ordered" | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const nextLine = lines[i + 1] || "";
+
+    // Skip empty lines between paragraphs
+    if (line.trim() === "") {
+      currentList = null;
+      currentListType = null;
+      continue;
+    }
+
+    // Handle bullet points
+    if (line.trim().startsWith("- ")) {
+      const listItem = line.trim().substring(2);
+      if (currentListType !== "bullet") {
+        currentList = {
+          type: "bulletList",
+          content: [],
+        };
+        content.push(currentList);
+        currentListType = "bullet";
+      }
+      currentList.content.push({
+        type: "listItem",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              {
                 type: "text",
                 text: listItem,
               },
@@ -397,6 +418,23 @@ class JiraServer {
         required: ["projectKey"],
       },
     },
+    get_issue_create_meta: {
+      description: "Get Jira 'create issue' metadata (required fields + allowed values) for a project and issue type",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectKey: {
+            type: "string",
+            description: "Project key (e.g. 'CPG')",
+          },
+          issueType: {
+            type: "string",
+            description: "Issue type name (e.g. 'Task' or 'Intervention')",
+          },
+        },
+        required: ["projectKey", "issueType"],
+      },
+    },
     update_issue: {
       description: "Update an existing Jira issue",
       inputSchema: {
@@ -426,6 +464,21 @@ class JiraServer {
             type: "string",
             description: "New priority",
           },
+          customFields: {
+            type: "object",
+            description: "Optional custom fields as key-value pairs. Same format as create_issue.",
+          },
+          useRawDescription: {
+            type: "boolean",
+            description: "If true, use plain text for description instead of ADF format. Use this if your Jira instance doesn't support ADF.",
+          },
+          labels: {
+            type: "array",
+            items: {
+              type: "string",
+            },
+            description: "Array of labels to apply (replaces existing labels)",
+          }
         },
         required: ["issueKey"],
       },
@@ -472,6 +525,32 @@ class JiraServer {
         required: ["email"],
       },
     },
+    search_users: {
+      description: "Search for Jira users by name or email to find their account ID/username",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Name or email of the user (e.g. 'George' or 'George Dupont')"
+          }
+        },
+        required: ["query"]
+      }
+    },
+    list_project_users: {
+      description: "List all users/members assigned to a specific project",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectKey: {
+            type: "string",
+            description: "Project key (e.g. EXPLOIT)"
+          }
+        },
+        required: ["projectKey"]
+      }
+    },
     create_issue: {
       description: "Create a new Jira issue",
       inputSchema: {
@@ -515,6 +594,14 @@ class JiraServer {
             type: "string",
             description: "Issue priority",
           },
+          customFields: {
+            type: "object",
+            description: "Optional custom fields as key-value pairs. For select fields, use {id: 'optionId'} or {value: 'optionValue'}. For multiselect, use [{id: 'id1'}, {id: 'id2'}]. Example: {'customfield_11553': {id: '10001'}, 'customfield_14550': [{id: '10002'}]}",
+          },
+          useRawDescription: {
+            type: "boolean",
+            description: "If true, use plain text for description instead of ADF format. Use this if your Jira instance doesn't support ADF.",
+          },
         },
         required: ["projectKey", "summary", "issueType"],
       },
@@ -550,7 +637,9 @@ class JiraServer {
       },
       {
         capabilities: {
-          tools: this.toolDefinitions,
+          tools: {
+            listChanged: true,
+          },
         },
       }
     );
@@ -579,6 +668,14 @@ class JiraServer {
       await this.server.close();
       process.exit(0);
     });
+  }
+
+  private async findUser(query: string): Promise<any[]> {
+    const uri = (this.jira as any).makeUri({
+      pathname: '/user/search',
+      query: { username: query, query: query }
+    });
+    return await (this.jira as any).doRequest((this.jira as any).makeRequestHeader(uri));
   }
 
   private validateDeleteIssueArgs(args: unknown): args is { issueKey: string } {
@@ -672,6 +769,27 @@ class JiraServer {
       );
     }
 
+    return true;
+  }
+
+  private validateGetIssueCreateMetaArgs(args: unknown): args is GetIssueCreateMetaArgs {
+    if (typeof args !== "object" || args === null) {
+      throw new McpError(ErrorCode.InvalidParams, "Arguments must be an object");
+    }
+
+    const { projectKey, issueType, expand } = args as Partial<GetIssueCreateMetaArgs>;
+
+    if (typeof projectKey !== "string" || projectKey.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "projectKey is required and must be a string");
+    }
+
+    if (typeof issueType !== "string" || issueType.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "issueType is required and must be a string");
+    }
+
+    if (expand !== undefined && typeof expand !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, "expand must be a string if provided");
+    }
     return true;
   }
 
@@ -776,19 +894,19 @@ class JiraServer {
             ) {
               // Get issue types for specific project
               const projectKey = request.params.arguments.projectKey as string;
-              
+
               // First get all issue types
-              const allIssueTypes = await this.jira.listIssueTypes();
-              
+              const allIssueTypesRaw = await this.jira.listIssueTypes();
+              const allIssueTypes: IssueType[] = Array.isArray(allIssueTypesRaw)
+                ? allIssueTypesRaw
+                : (allIssueTypesRaw?.issueTypes ?? allIssueTypesRaw?.values ?? []);
               // Then get the project to find which issue types are associated with it
               try {
                 const project = await this.jira.getProject(projectKey);
-                
                 if (project && project.issueTypes) {
                   // Filter issue types to only those in the project
                   const projectIssueTypeIds = project.issueTypes.map((t: any) => t.id);
-                  
-                  response = allIssueTypes.filter((type: IssueType) => 
+                  response = allIssueTypes.filter((type: IssueType) =>
                     projectIssueTypeIds.includes(type.id)
                   );
                 } else {
@@ -803,13 +921,16 @@ class JiraServer {
               // Get all issue types
               response = await this.jira.listIssueTypes();
             }
-            
+            const responseArr: IssueType[] = Array.isArray(response)
+              ? response
+              : (response?.issueTypes ?? response?.values ?? []);
+
             return {
               content: [
                 {
                   type: "text",
                   text: JSON.stringify(
-                    response.map((type: IssueType) => ({
+                    responseArr.map((type: IssueType) => ({
                       id: type.id,
                       name: type.name,
                       description: type.description,
@@ -821,6 +942,49 @@ class JiraServer {
                 },
               ],
             };
+          }
+
+          // You have to be ADMIN to use this
+          case "list_project_users": {
+            const args = request.params.arguments as any;
+            if (!args.projectKey) throw new McpError(ErrorCode.InvalidParams, "projectKey required");
+
+            try {
+              const rolesPath = `/project/${args.projectKey}/role`;
+              const rolesUri = (this.jira as any).makeUri({ pathname: rolesPath });
+              const roles = await (this.jira as any).doRequest((this.jira as any).makeRequestHeader(rolesUri));
+
+              const allUsers = new Map();
+
+              for (const roleName in roles) {
+                const roleUrl = roles[roleName];
+                const response = await (this.jira as any).doRequest((this.jira as any).makeRequestHeader(roleUrl));
+
+                if (response.actors) {
+                  response.actors.forEach((actor: any) => {
+                    if (actor.type === "atlassian-user-role-actor") {
+                      allUsers.set(actor.name, {
+                        displayName: actor.displayName,
+                        name: actor.name,
+                        accountId: actor.actorUser?.accountId
+                      });
+                    }
+                  });
+                }
+              }
+
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify(Array.from(allUsers.values()), null, 2)
+                }]
+              };
+            } catch (error: any) {
+              return {
+                content: [{ type: "text", text: `Error listing users: ${error.message}` }],
+                isError: true
+              };
+            }
           }
 
           case "get_issues": {
@@ -853,6 +1017,7 @@ class JiraServer {
                 "issuetype",
                 "parent",
                 "subtasks",
+                "labels",
               ],
             });
 
@@ -881,80 +1046,94 @@ class JiraServer {
             };
           }
 
-          case "update_issue": {
-            if (
-              !request.params.arguments ||
-              typeof request.params.arguments !== "object"
-            ) {
-              throw new McpError(
-                ErrorCode.InvalidParams,
-                "Arguments are required"
-              );
-            }
-
-            const unknownArgs = request.params.arguments as unknown;
-            this.validateUpdateIssueArgs(unknownArgs);
-            const args = unknownArgs as UpdateIssueArgs;
-
-            const updateFields: any = {};
-
-            if (args.summary) {
-              updateFields.summary = args.summary;
-            }
-            if (args.description) {
-              updateFields.description = await replaceMentionsWithADF(args.description, this.jira);
-            }
-            if (args.assignee) {
-              const users = await this.jira.searchUsers({
-                query: args.assignee,
-                includeActive: true,
-                maxResults: 1,
-              });
-              if (users && users.length > 0) {
-                updateFields.assignee = { accountId: users[0].accountId };
-              }
-            }
-            if (args.status) {
-              const transitions = await this.jira.listTransitions(
-                args.issueKey
-              );
-              const transition = transitions.transitions.find(
-                (t: any) => t.name.toLowerCase() === args.status?.toLowerCase()
-              );
-              if (transition) {
-                await this.jira.transitionIssue(args.issueKey, {
-                  transition: { id: transition.id },
-                });
-              }
-            }
-            if (args.priority) {
-              updateFields.priority = { name: args.priority };
-            }
-
-            if (Object.keys(updateFields).length > 0) {
-              await this.jira.updateIssue(args.issueKey, {
-                fields: updateFields,
-              });
-            }
-
+          case "search_users": {
+            const args = request.params.arguments as any;
+            const users = await this.findUser(args.query);
             return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(
-                    {
-                      message: "Issue updated successfully",
-                      issue: {
-                        key: args.issueKey,
-                        url: `https://${JIRA_HOST}/browse/${args.issueKey}`,
-                      },
-                    },
-                    null,
-                    2
-                  ),
-                },
-              ],
+              content: [{
+                type: "text",
+                text: JSON.stringify(users.map((u: any) => ({
+                  displayName: u.displayName,
+                  emailAddress: u.emailAddress,
+                  key: u.key,
+                  name: u.name
+                })), null, 2)
+              }]
             };
+          }
+
+          case "get_issue_create_meta": {
+            if (!request.params.arguments || typeof request.params.arguments !== "object") {
+              throw new McpError(ErrorCode.InvalidParams, "Arguments are required");
+            }
+
+            const args = request.params.arguments as any;
+            this.validateGetIssueCreateMetaArgs(args);
+
+            try {
+              const allTypesRaw = await this.jira.listIssueTypes();
+              const allTypes = Array.isArray(allTypesRaw) ? allTypesRaw : (allTypesRaw?.values ?? []);
+              const targetType = allTypes.find((t: any) => t.name.toLowerCase() === args.issueType.toLowerCase());
+
+              if (!targetType) {
+                throw new Error(`The type '${args.issueType}' has not been found.`);
+              }
+
+              const apiPath = `/issue/createmeta/${args.projectKey}/issuetypes/${targetType.id}?expand=projects.issutypes.fields`;
+              const response = await (this.jira as any).doRequest({
+                method: 'GET',
+                uri: (this.jira as any).makeUri({ pathname: apiPath }),
+                json: true
+              });
+
+              const fieldList = Array.isArray(response.values) ? response.values : [];
+              const requiredFields = fieldList
+                .filter((f: any) => f.required)
+                .map((f: any) => ({
+                  id: f.fieldId,
+                  name: f.name,
+                  required: true,
+                  schema: f.schema,
+                }));
+
+
+              const fieldsWithAllowedValues = fieldList
+                .filter((f: any) => Array.isArray(f.allowedValues))
+                .map((f: any) => ({
+                  id: f.fieldId,
+                  name: f.name,
+                  required: !!f.required,
+                  schema: f.schema,
+                  allowedValues: f.allowedValues.map((v: any) => ({
+                    id: v.id,
+                    value: v.value ?? v.name,
+                  })),
+                }));
+
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify(
+                      {
+                        projectKey: args.projectKey,
+                        issueType: args.issueType,
+                        issueTypeId: targetType.id,
+                        requiredFields,
+                        fieldsWithAllowedValues,
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            } catch (error: any) {
+              return {
+                content: [{ type: "text", text: `Error Jira: ${error.message}` }],
+                isError: true,
+              };
+            }
           }
 
           case "get_user": {
@@ -1024,43 +1203,225 @@ class JiraServer {
             const args = unknownArgs as CreateIssueArgs;
 
             const projectKey = args.projectKey || DEFAULT_PROJECT.KEY;
-            const assignee = args.assignee || DEFAULT_MANAGER.EMAIL;
 
-            const response = await this.jira.addNewIssue({
-              fields: {
-                project: { key: projectKey },
-                summary: args.summary,
-                issuetype: { name: args.issueType },
-                description: args.description
-                  ? await replaceMentionsWithADF(args.description, this.jira)
-                  : undefined,
-                assignee: { accountId: assignee },
-                labels: args.labels,
-                components: args.components?.map((name) => ({ name })),
-                priority: args.priority ? { name: args.priority } : undefined,
-                parent: args.parent ? { key: args.parent } : undefined,
-              },
-            });
-
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(
-                    {
-                      message: "Issue created successfully",
-                      issue: {
-                        id: response.id,
-                        key: response.key,
-                        url: `https://${JIRA_HOST}/browse/${response.key}`,
-                      },
-                    },
-                    null,
-                    2
-                  ),
-                },
-              ],
+            // Prepare issue fields
+            const issueFields: any = {
+              project: { key: projectKey },
+              summary: args.summary,
+              issuetype: { name: args.issueType },
+              labels: args.labels,
+              components: args.components?.map((name) => ({ name })),
+              priority: args.priority ? { name: args.priority } : undefined,
+              parent: args.parent ? { key: args.parent } : undefined,
             };
+
+            // Handle description - use raw text if specified, otherwise try ADF format
+            if (args.description) {
+              if (args.useRawDescription) {
+                issueFields.description = args.description;
+              } else {
+                issueFields.description = await replaceMentionsWithADF(args.description, this.jira);
+              }
+            }
+
+            // Handle assignee if provided
+            if (args.assignee) {
+              const users = await this.jira.searchUsers({
+                query: args.assignee,
+                includeActive: true,
+                maxResults: 1,
+              });
+              if (users && users.length > 0) {
+                issueFields.assignee = { accountId: users[0].accountId };
+              }
+            }
+
+            // Add custom fields if provided
+            if (args.customFields) {
+              Object.entries(args.customFields).forEach(([key, value]) => {
+                issueFields[key] = value;
+              });
+            }
+
+            // Try to create issue with ADF description first
+            try {
+              const response = await this.jira.addNewIssue({
+                fields: issueFields,
+              });
+
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify(
+                      {
+                        message: "Issue created successfully",
+                        issue: {
+                          id: response.id,
+                          key: response.key,
+                          url: `https://${JIRA_HOST}/browse/${response.key}`,
+                        },
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            } catch (error: any) {
+              // Check if this is a description format error  
+              const errorString = JSON.stringify(error);
+              const hasDescriptionError = error.errors && error.errors.description;
+              const isStringFormatError = errorString.includes("chaîne") ||
+                errorString.includes("string") ||
+                hasDescriptionError;
+
+              if (args.description && !args.useRawDescription && isStringFormatError) {
+                console.error("[create_issue] ADF format failed, retrying with plain text description");
+                issueFields.description = args.description;
+
+                try {
+                  const response = await this.jira.addNewIssue({
+                    fields: issueFields,
+                  });
+
+                  return {
+                    content: [
+                      {
+                        type: "text",
+                        text: JSON.stringify(
+                          {
+                            message: "Issue created successfully (with plain text description)",
+                            issue: {
+                              id: response.id,
+                              key: response.key,
+                              url: `https://${JIRA_HOST}/browse/${response.key}`,
+                            },
+                          },
+                          null,
+                          2
+                        ),
+                      },
+                    ],
+                  };
+                } catch (retryError) {
+                  // If the retry also fails, throw the original error
+                  throw error;
+                }
+              }
+              // If it's not a description error, rethrow
+              throw error;
+            }
+          }
+
+          case "update_issue": {
+            if (
+              !request.params.arguments ||
+              typeof request.params.arguments !== "object"
+            ) {
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                "Arguments are required"
+              );
+            }
+            const unknownArgs = request.params.arguments as unknown;
+            this.validateUpdateIssueArgs(unknownArgs);
+            const args = unknownArgs as UpdateIssueArgs;
+
+            try {
+              await this.jira.findIssue(args.issueKey);
+              const updateFields: any = {};
+
+              if (args.summary) {
+                updateFields.summary = args.summary;
+              }
+              if (args.description) {
+                if (args.useRawDescription) {
+                  updateFields.description = args.description;
+                } else {
+                  updateFields.description = await replaceMentionsWithADF(args.description, this.jira);
+                }
+              }
+              if (args.assignee) {
+                let users = await this.jira.searchUsers({
+                  query: args.assignee,
+                  maxResults: 1,
+                });
+                if (!users || users.length === 0) {
+                  users = await this.findUser(args.assignee);
+                }
+                if (users && users.length > 0) {
+                  const user = users[0];
+                  const userIdentifier = user.name || user.accountId || user.key;
+                  try {
+                    const assigneeUri = (this.jira as any).makeUri({
+                      pathname: `/issue/${args.issueKey}/assignee`
+                    });
+
+                    await (this.jira as any).doRequest({
+                      method: 'PUT',
+                      uri: assigneeUri,
+                      body: { name: userIdentifier },
+                      json: true
+                    });
+
+                  } catch (assignError: any) {
+                    throw new Error(`Error to assign an user : ${assignError.message}`);
+                  }
+                } else {
+                  throw new Error(`User '${args.assignee} not found with : '${users}`)
+                }
+              }
+              if (args.status) {
+                const transitions = await this.jira.listTransitions(
+                  args.issueKey
+                );
+                const transition = transitions.transitions.find(
+                  (t: any) => t.name.toLowerCase() === args.status?.toLowerCase()
+                );
+                if (transition) {
+                  await this.jira.transitionIssue(args.issueKey, {
+                    transition: { id: transition.id },
+                  });
+                }
+              }
+              if (args.labels) {
+                updateFields.labels = args.labels;
+              }
+
+              if (Object.keys(updateFields).length > 0) {
+                await this.jira.updateIssue(args.issueKey, {
+                  fields: updateFields,
+                });
+              }
+
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify(
+                      {
+                        message: "Issue updated successfully",
+                        issue: {
+                          key: args.issueKey,
+                          url: `https://${JIRA_HOST}/browse/${args.issueKey}`,
+                        },
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            } catch (error: any) {
+              return {
+                content: [{
+                  type: "text",
+                  text: `Update failed for ${args.issueKey}: ${error.message || JSON.stringify(error)}`
+                }],
+                isError: true
+              };
+            }
           }
 
           case "delete_issue": {
@@ -1145,13 +1506,13 @@ class JiraServer {
               `Unknown tool: ${request.params.name}`
             );
         }
-      } catch (error) {
+      } catch (error: any) {
         const errorMessage =
-          error instanceof Error ? error.message : "Unknown error occurred";
+          error instanceof Error
+            ? (error.message || JSON.stringify(error))
+            : JSON.stringify(error);
         return {
-          content: [
-            { type: "text", text: `Operation failed: ${errorMessage}` },
-          ],
+          content: [{ type: "text", text: `Operation failed: ${errorMessage}` }],
           isError: true,
         };
       }
@@ -1164,6 +1525,5 @@ class JiraServer {
     console.error("Jira MCP server running on stdio");
   }
 }
-
 const jiraServer = new JiraServer();
 jiraServer.run().catch((error: Error) => console.error(error));

@@ -18,8 +18,9 @@
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "0.6.0",
-    "jira-client": "^8.2.2"
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "jira-client": "^8.2.2",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "@types/jira-client": "^7.1.9",
