@@ -33,6 +33,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import JiraClient from "jira-client";
 import "dotenv/config";
+import { fileURLToPath } from 'url';
 
 /**
  * Default project configuration from README.md
@@ -384,9 +385,9 @@ function convertToADF(text: string) {
   };
 }
 
-class JiraServer {
+export class JiraServer {
   private readonly server: Server;
-  private readonly jira: JiraClient;
+  public readonly jira: JiraClient;
   private readonly toolDefinitions = {
     delete_issue: {
       description: "Delete a Jira issue or subtask",
@@ -1525,5 +1526,7 @@ class JiraServer {
     console.error("Jira MCP server running on stdio");
   }
 }
-const jiraServer = new JiraServer();
-jiraServer.run().catch((error: Error) => console.error(error));
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const jiraServer = new JiraServer();
+  jiraServer.run().catch((error: Error) => console.error(error));
+}
